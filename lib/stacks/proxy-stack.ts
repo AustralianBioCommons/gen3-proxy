@@ -250,7 +250,11 @@ export class ProxyStack extends cdk.Stack {
         "SSH from VPC"
       );
 
+      const asgName = `${qualifiedName}-proxy-az${index}`;  // e.g. bpsyc-gen3-test-proxy-az0
+
+
       const asg = new autoscaling.AutoScalingGroup(this, `ProxyAsg${index}`, {
+        autoScalingGroupName: asgName,
         vpc,
         instanceType: new ec2.InstanceType(props.proxy.instanceType),
         machineImage: ec2.MachineImage.latestAmazonLinux2({
