@@ -250,8 +250,13 @@ export class ProxyStack extends cdk.Stack {
         "SSH from VPC"
       );
 
-      const asgName = `${qualifiedName}-proxy-az${index}`;  // e.g. bpsyc-gen3-test-proxy-az0
-
+      // Give the ASG an explicit concrete name.
+      // This is the key fix for the circular dependency:
+      //   alarm name → asg.autoScalingGroupName (CFN Ref) → ASG → lifecycle hook
+      //   → SNS topic → (Lambda subscription) → alarm action → alarm → cycle
+      // By setting an explicit name, asg.autoScalingGroupName becomes a plain
+      // string (no CFN Ref), so the alarm name is also concrete — cycle broken.
+      const asgName = `${qualifiedName}-proxy-az${index}`;
 
       const asg = new autoscaling.AutoScalingGroup(this, `ProxyAsg${index}`, {
         autoScalingGroupName: asgName,
@@ -274,21 +279,48 @@ export class ProxyStack extends cdk.Stack {
         healthChecks: autoscaling.HealthChecks.ec2({
           gracePeriod: cdk.Duration.minutes(8),
         }),
-        signals: autoscaling.Signals.waitForAll({
-          timeout: cdk.Duration.minutes(15),
-        }),
+        // NOTE: We do NOT use autoscaling.Signals.waitForAll() here.
+        // CDK's Signals implementation adds DependsOn edges between every ASG
+        // in the stack to enforce signal ordering — this creates the circular
+        // dependency with lifecycle hooks and alarms that CFN rejects.
+        // cfn-signal is called directly in user-data (step 7 of the script),
+        // which is sufficient for CloudFormation to track instance readiness.
       });
 
-      // Build user-data by substituting all tokens in TypeScript.
-      // We deliberately avoid cdk.Fn.sub because:
-      //   1. Fn::Sub variable maps don't support CFN pseudo-variables like
-      //      ${aws:AutoScalingGroupName} as values — CFN rejects the template.
-      //   2. ${AWS::Region} / ${AWS::StackName} are available as concrete CDK
-      //      tokens (this.region, this.stackName) that resolve correctly.
-      //   3. asg.autoScalingGroupName is a CFN token that resolves at deploy time
-      //      and is safe to embed directly in the UserData string.
+      // Build user-data using ONLY concrete strings — no CDK tokens allowed.
+      //
+      // When asg.addUserData() receives a string containing CFN tokens (e.g.
+      // this.region, this.stackName, asg.autoScalingGroupName), CDK wraps the
+      // entire UserData in Fn::Sub. CFN's Fn::Sub then rejects any bare bash
+      // dollar signs ($((...)), ${VAR}, ${instance_id}) as malformed intrinsic
+      // function arguments — even though they are valid bash syntax.
+      //
+      // Solution: resolve everything to concrete strings at synth time.
+      //   - Region and stack name come from props / construct IDs (concrete).
+      //   - ASG name: the instance reads it from EC2 instance metadata at boot
+      //     via the autoscaling:describe-auto-scaling-instances API call, then
+      //     writes it to /etc/asg-name so the CW agent config can reference it
+      //     using the {instance_id} built-in rather than a token.
       const cfnAsg = asg.node.defaultChild as autoscaling.CfnAutoScalingGroup;
       const asgLogicalId = cfnAsg.logicalId;
+
+      // Apply CreationPolicy directly on the CfnAutoScalingGroup so CFN waits
+      // for cfn-signal from user-data before marking the resource complete.
+      // We do this at the L1 level rather than via autoscaling.Signals (L2)
+      // because Signals.waitForAll() adds cross-ASG DependsOn edges that create
+      // the circular dependency with lifecycle hooks and alarms.
+      cfnAsg.cfnOptions.creationPolicy = {
+        resourceSignal: {
+          count: 1,
+          timeout: "PT15M",
+        },
+      };
+
+      // this.stackName is always a CFN token ({"Ref":"AWS::StackName"}) even
+      // when stackName is passed explicitly — CDK never inlines it as a literal.
+      // We reconstruct the concrete name from the construct id (set in deploy-proxy.ts
+      // to `${stageConfig.id}Proxy`, matching the stackName prop passed there).
+      const concreteStackName = this.artifactId;
 
       const userDataTemplate = readFileSync(
         path.join(__dirname, "../../assets/user_data/squid_user_data.sh"),
@@ -296,21 +328,18 @@ export class ProxyStack extends cdk.Stack {
       );
 
       const userDataStr = userDataTemplate
-        // Config-file / environment tokens (concrete strings at synth time)
         .replace(/__S3BUCKET__/g, configBucket.bucketName)
         .replace(/__ASG__/g, asgLogicalId)
+        .replace(/__ASG_NAME__/g, asgName)           // concrete — no CFN Ref
         .replace(/__AZ_INDEX__/g, String(index))
         .replace(/__ENV_NAME__/g, envName)
         .replace(/__SSM_PREFIX__/g, props.ssmPrefix)
         .replace(/__PROJECT__/g, props.project)
         .replace(/__APPLICATION__/g, props.application)
         .replace(/__ALLOCATE_EIPS__/g, props.proxy.allocateEips ? "true" : "false")
-        // CFN pseudo-references — use CDK token equivalents, not Fn::Sub
-        .replace(/__REGION__/g, this.region)
-        .replace(/__STACK_NAME__/g, this.stackName)
-        // CloudWatch agent ASG name — asg.autoScalingGroupName is a CFN token
-        // that CDK embeds as a Ref in the UserData JSON, resolved at deploy time
-        .replace(/__CW_ASG__/g, asg.autoScalingGroupName);
+        // Concrete at synth time — no CDK tokens, no Fn::Sub generated
+        .replace(/__REGION__/g, props.envTarget.region)
+        .replace(/__STACK_NAME__/g, concreteStackName);
 
       asg.addUserData(userDataStr);
 
@@ -341,19 +370,21 @@ export class ProxyStack extends cdk.Stack {
         applyToLaunchedInstances: false,
       });
 
-      // CloudWatch alarm — breaches when Squid process CPU disappears
+      // CloudWatch alarm — breaches when Squid process CPU disappears.
+      // Both dimensionsMap and alarmName use the concrete asgName string,
+      // so there is no CFN Ref to the ASG resource here — no circular dep.
       const squidMetric = new cloudwatch.Metric({
         namespace: "CWAgent",
         metricName: "procstat_cpu_usage",
         dimensionsMap: {
-          AutoScalingGroupName: asg.autoScalingGroupName,
+          AutoScalingGroupName: asgName,
           pidfile: "/var/run/squid.pid",
           process_name: "squid",
         },
       });
 
       const alarm = new cloudwatch.Alarm(this, `SquidAlarm${index}`, {
-        alarmName: `squid-alarm_${asg.autoScalingGroupName}`,
+        alarmName: `squid-alarm_${asgName}`,
         alarmDescription: `Squid heartbeat for ${qualifiedName} AZ${index + 1}`,
         comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_OR_EQUAL_TO_THRESHOLD,
         metric: squidMetric,
