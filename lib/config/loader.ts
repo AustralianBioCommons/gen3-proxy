@@ -62,10 +62,12 @@ export function resolveStageConfig(
     stageName: stage.stageName,
     envTarget,
     networkLookup: {
+      vpcId: stage.networkLookup.vpcId,
       vpcIdParameterName: stage.networkLookup.vpcIdParameterName,
       proxiedSubnetIdsParameterName: stage.networkLookup.proxiedSubnetIdsParameterName,
       publicSubnetIdsParameterName: stage.networkLookup.publicSubnetIdsParameterName,
       vpcCidr: stage.networkLookup.vpcCidr,
+      availabilityZones: stage.networkLookup.availabilityZones,
     },
     proxy: resolveProxyConfig(stage.proxy),
     requireManualApproval: stage.approvals?.requireManualApproval ?? false,

@@ -36,8 +36,14 @@ export interface StageConfig {
 }
 
 export interface NetworkLookupConfig {
-  /** SSM param name containing the VPC ID */
-  vpcIdParameterName: string;
+  /**
+   * The concrete VPC ID (e.g. "vpc-0abc1234").
+   * Must be a literal string — Vpc.fromVpcAttributes / Vpc.fromLookup cannot
+   * accept SSM tokens at synth time.
+   */
+  vpcId: string;
+  /** SSM param name containing the VPC ID (used for CfnOutput reference only). */
+  vpcIdParameterName?: string;
   /**
    * SSM param name containing a comma-separated list of private/isolated subnet
    * IDs whose route tables the proxy will update (the "proxied" subnets).
@@ -50,6 +56,12 @@ export interface NetworkLookupConfig {
   publicSubnetIdsParameterName: string;
   /** VPC CIDR — used for security-group ingress rules. */
   vpcCidr: string;
+  /**
+   * Availability zones for the VPC — must match the number of public subnets.
+   * Required because Vpc.fromVpcAttributes needs concrete AZ strings at synth time.
+   * e.g. ["ap-southeast-2a", "ap-southeast-2b", "ap-southeast-2c"]
+   */
+  availabilityZones: string[];
 }
 
 export interface ProxyConfig {
@@ -79,10 +91,12 @@ export interface ApprovalConfig {
 // ---------------------------------------------------------------------------
 
 export interface ResolvedNetworkLookupConfig {
-  vpcIdParameterName: string;
+  vpcId: string;
+  vpcIdParameterName?: string;
   proxiedSubnetIdsParameterName: string;
   publicSubnetIdsParameterName: string;
   vpcCidr: string;
+  availabilityZones: string[];
 }
 
 export interface ResolvedProxyConfig {

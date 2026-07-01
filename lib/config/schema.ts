@@ -27,8 +27,10 @@ export function validateConfig(config: AppConfig): void {
       );
     }
 
-    if (!stage.networkLookup?.vpcIdParameterName) {
-      throw new Error(`stage ${stage.id}: networkLookup.vpcIdParameterName is required`);
+    if (!stage.networkLookup?.vpcId) {
+      throw new Error(
+        `stage ${stage.id}: networkLookup.vpcId is required (must be a concrete VPC ID, not an SSM token)`
+      );
     }
     if (!stage.networkLookup?.proxiedSubnetIdsParameterName) {
       throw new Error(
@@ -42,6 +44,14 @@ export function validateConfig(config: AppConfig): void {
     }
     if (!stage.networkLookup?.vpcCidr) {
       throw new Error(`stage ${stage.id}: networkLookup.vpcCidr is required`);
+    }
+    if (
+      !stage.networkLookup?.availabilityZones ||
+      stage.networkLookup.availabilityZones.length === 0
+    ) {
+      throw new Error(
+        `stage ${stage.id}: networkLookup.availabilityZones is required (e.g. ["ap-southeast-2a", "ap-southeast-2b"])`
+      );
     }
 
     if (!stage.proxy) {

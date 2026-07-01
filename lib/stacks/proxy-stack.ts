@@ -25,31 +25,53 @@ export class ProxyStack extends cdk.Stack {
     const qualifiedName = `${props.namePrefix}-${envName}`;
 
     // -------------------------------------------------------------------------
-    // Network: resolve VPC + subnets from SSM (same pattern as gen3-search)
+    // Network: resolve VPC + subnets
+    //
+    // Vpc.fromLookup() and Vpc.fromVpcAttributes() both require a *concrete*
+    // VPC ID at synth time — SSM tokens (cdk.Token) are rejected.
+    // We therefore take vpcId as a literal string in the config (same approach
+    // gen3-search uses for availabilityZones).
+    //
+    // Subnet IDs *can* be SSM tokens because ec2.Subnet.fromSubnetId() and the
+    // ASG vpcSubnets accept CFN tokens — they're only resolved at deploy time.
+    // We follow the exact same Fn.split / Fn.select pattern as gen3-search.
     // -------------------------------------------------------------------------
 
-    const vpcId = ssm.StringParameter.valueForStringParameter(
-      this,
-      props.networkLookup.vpcIdParameterName
-    );
+    const azCount = props.networkLookup.availabilityZones.length;
 
     // Public subnets — where proxy EC2 instances are placed
     const publicSubnetIdsRaw = ssm.StringParameter.valueForStringParameter(
       this,
       props.networkLookup.publicSubnetIdsParameterName
     );
+    const publicSubnetIds = cdk.Fn.split(",", publicSubnetIdsRaw);
 
-    // Proxied subnets — whose route tables will point to the proxy instances
+    // Proxied subnets — whose route tables the Lambda updates on failover.
+    // The Lambda reads the SSM param name from the ASG tag and calls
+    // ec2:DescribeSubnets at runtime to get actual route table IDs.
     const proxiedSubnetIdsRaw = ssm.StringParameter.valueForStringParameter(
       this,
       props.networkLookup.proxiedSubnetIdsParameterName
     );
 
-    // We use Vpc.fromLookup (not fromVpcAttributes) here because the ASG
-    // construct needs real subnet objects with routeTable IDs at synth time
-    // (same approach as squid-aws-proxy).  Callers must ensure cdk.context.json
-    // is bootstrapped OR pass --context flag on first deploy.
-    const vpc = ec2.Vpc.fromLookup(this, "Vpc", { vpcId });
+    // Build concrete Subnet objects for each public AZ slot using Fn::Select.
+    // These are used in vpcSubnets on the ASG — CDK accepts token subnet IDs here.
+    const publicSubnets = Array.from({ length: azCount }, (_, i) =>
+      ec2.Subnet.fromSubnetId(
+        this,
+        `PublicSubnet${i}`,
+        cdk.Fn.select(i, publicSubnetIds)
+      )
+    );
+
+    // Vpc.fromVpcAttributes accepts token vpcId only if we do NOT pass subnet
+    // arrays (which trigger AZ-count validation at synth time).
+    // We pass the concrete vpcId from config and placeholder AZs so the VPC
+    // object can be used for security-group / CIDR references.
+    const vpc = ec2.Vpc.fromVpcAttributes(this, "Vpc", {
+      vpcId: props.networkLookup.vpcId,
+      availabilityZones: props.networkLookup.availabilityZones,
+    });
 
     // -------------------------------------------------------------------------
     // S3 bucket for Squid config / whitelist files
@@ -200,7 +222,7 @@ export class ProxyStack extends cdk.Stack {
 
     const squidAsgs: autoscaling.AutoScalingGroup[] = [];
 
-    vpc.availabilityZones.forEach((az, index) => {
+    props.networkLookup.availabilityZones.forEach((az, index) => {
       // Security group for this proxy instance
       const sg = new ec2.SecurityGroup(this, `ProxySg${index}`, {
         vpc,
@@ -241,10 +263,10 @@ export class ProxyStack extends cdk.Stack {
         desiredCapacity: 1,
         minCapacity: 1,
         maxCapacity: 1,
-        vpcSubnets: {
-          subnetType: ec2.SubnetType.PUBLIC,
-          availabilityZones: [az],
-        },
+        // Use the explicit subnet object derived from the SSM token via Fn::Select.
+        // Passing a SubnetType would trigger a VPC subnet lookup at synth time,
+        // which fails when the VPC has no real subnet metadata (fromVpcAttributes).
+        vpcSubnets: { subnets: [publicSubnets[index]] },
         healthChecks: autoscaling.HealthChecks.ec2({
           gracePeriod: cdk.Duration.minutes(8),
         }),
