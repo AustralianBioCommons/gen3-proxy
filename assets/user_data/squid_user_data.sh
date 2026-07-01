@@ -3,7 +3,10 @@
 exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
 
 # ---------------------------------------------------------------------------
-# Tokens replaced by CDK (build-time):
+# All tokens are replaced by the CDK stack (proxy-stack.ts) at synth time
+# using plain TypeScript string substitution — no Fn::Sub is used.
+#
+# Tokens replaced with concrete strings (synth time):
 #   __S3BUCKET__      – S3 bucket containing Squid config files
 #   __ASG__           – CloudFormation logical ID of this ASG (for cfn-signal)
 #   __AZ_INDEX__      – 0-based AZ index (used as EIP SSM suffix)
@@ -13,16 +16,16 @@ exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&
 #   __APPLICATION__   – application name
 #   __ALLOCATE_EIPS__ – "true" or "false"
 #
-# Tokens resolved by CloudFormation Fn::Sub at deploy time:
-#   ${__CW_ASG__}     – actual ASG name at runtime (aws:AutoScalingGroupName)
-#   ${AWS::Region}    – current region
-#   ${AWS::StackName} – current stack name
+# Tokens replaced with CDK token strings (resolved to real values by CFN):
+#   __REGION__        – current AWS region  (← this.region CDK token)
+#   __STACK_NAME__    – current stack name  (← this.stackName CDK token)
+#   __CW_ASG__        – actual ASG name     (← asg.autoScalingGroupName CDK token)
 # ---------------------------------------------------------------------------
 
 OVERALL_STATUS=0
 trap 'OVERALL_STATUS=1' ERR
 
-REGION="${AWS::Region}"
+REGION="__REGION__"
 INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
 
 # ---------------------------------------------------------------------------
@@ -68,7 +71,7 @@ if [ "__ALLOCATE_EIPS__" = "true" ]; then
       --region "$REGION") || OVERALL_STATUS=1
 
     if [ -n "$ALLOC_ID" ]; then
-      # Persist allocation ID and public IP to SSM so the stack & other consumers can read them
+      # Persist allocation ID and public IP to SSM
       PUBLIC_IP=$(aws ec2 describe-addresses \
         --allocation-ids "$ALLOC_ID" \
         --query "Addresses[0].PublicIp" \
@@ -158,7 +161,7 @@ rm -f ~/mycron
 # ---------------------------------------------------------------------------
 # 6. CloudWatch Agent
 # ---------------------------------------------------------------------------
-rpm -Uvh "https://amazoncloudwatch-agent-${AWS::Region}.s3.${AWS::Region}.amazonaws.com/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm" || true
+rpm -Uvh "https://amazoncloudwatch-agent-__REGION__.s3.__REGION__.amazonaws.com/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm" || true
 
 cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'CW_EOF'
 {
@@ -167,7 +170,7 @@ cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'CW_E
     "metrics_collected": {
       "procstat": [ { "pid_file": "/var/run/squid.pid", "measurement": ["cpu_usage"] } ]
     },
-    "append_dimensions": { "AutoScalingGroupName": "${__CW_ASG__}" },
+    "append_dimensions": { "AutoScalingGroupName": "__CW_ASG__" },
     "force_flush_interval": 5
   },
   "logs": {
@@ -203,6 +206,6 @@ CW_EOF
 # ---------------------------------------------------------------------------
 yum update -y aws-cfn-bootstrap || true
 /opt/aws/bin/cfn-signal -e "$OVERALL_STATUS" \
-  --stack "${AWS::StackName}" \
+  --stack "__STACK_NAME__" \
   --resource "__ASG__" \
-  --region "${AWS::Region}"
+  --region "$REGION"

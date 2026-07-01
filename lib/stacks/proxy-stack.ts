@@ -275,7 +275,14 @@ export class ProxyStack extends cdk.Stack {
         }),
       });
 
-      // Build user-data from the shared template, substituting tokens
+      // Build user-data by substituting all tokens in TypeScript.
+      // We deliberately avoid cdk.Fn.sub because:
+      //   1. Fn::Sub variable maps don't support CFN pseudo-variables like
+      //      ${aws:AutoScalingGroupName} as values — CFN rejects the template.
+      //   2. ${AWS::Region} / ${AWS::StackName} are available as concrete CDK
+      //      tokens (this.region, this.stackName) that resolve correctly.
+      //   3. asg.autoScalingGroupName is a CFN token that resolves at deploy time
+      //      and is safe to embed directly in the UserData string.
       const cfnAsg = asg.node.defaultChild as autoscaling.CfnAutoScalingGroup;
       const asgLogicalId = cfnAsg.logicalId;
 
@@ -284,8 +291,8 @@ export class ProxyStack extends cdk.Stack {
         "utf-8"
       );
 
-      // Static token substitutions (CDK-time)
-      let userDataStr = userDataTemplate
+      const userDataStr = userDataTemplate
+        // Config-file / environment tokens (concrete strings at synth time)
         .replace(/__S3BUCKET__/g, configBucket.bucketName)
         .replace(/__ASG__/g, asgLogicalId)
         .replace(/__AZ_INDEX__/g, String(index))
@@ -293,14 +300,15 @@ export class ProxyStack extends cdk.Stack {
         .replace(/__SSM_PREFIX__/g, props.ssmPrefix)
         .replace(/__PROJECT__/g, props.project)
         .replace(/__APPLICATION__/g, props.application)
-        .replace(/__ALLOCATE_EIPS__/g, props.proxy.allocateEips ? "true" : "false");
+        .replace(/__ALLOCATE_EIPS__/g, props.proxy.allocateEips ? "true" : "false")
+        // CFN pseudo-references — use CDK token equivalents, not Fn::Sub
+        .replace(/__REGION__/g, this.region)
+        .replace(/__STACK_NAME__/g, this.stackName)
+        // CloudWatch agent ASG name — asg.autoScalingGroupName is a CFN token
+        // that CDK embeds as a Ref in the UserData JSON, resolved at deploy time
+        .replace(/__CW_ASG__/g, asg.autoScalingGroupName);
 
-      // CloudFormation pseudo-references (resolved at deploy time by CFN Fn::Sub)
-      const userData = cdk.Fn.sub(userDataStr, {
-        __CW_ASG__: "${aws:AutoScalingGroupName}",
-      });
-
-      asg.addUserData(userData);
+      asg.addUserData(userDataStr);
 
       // Lifecycle hook — Lambda completes it once routing is confirmed healthy
       const hookTopic = new sns.Topic(this, `LifecycleHookTopic${index}`, {
