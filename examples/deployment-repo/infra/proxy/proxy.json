@@ -1,0 +1,41 @@
+{
+  "project": "bpsyc",
+  "application": "gen3",
+  "owner": "Platform",
+  "naming": {
+    "namePrefix": "bpsyc-gen3",
+    "ssmPrefix": "/platform",
+    "secretPrefix": "platform"
+  },
+  "environments": {
+    "test": {
+      "name": "test",
+      "account": "__ACCOUNT_ID__",
+      "region": "ap-southeast-2"
+    },
+    "prod": {
+      "name": "prod",
+      "account": "__ACCOUNT_ID__",
+      "region": "ap-southeast-2"
+    }
+  },
+  "stages": [
+    {
+      "id": "BpsycTestProxy",
+      "stageName": "TEST",
+      "envKey": "test",
+      "networkLookup": {
+        "vpcIdParameterName": "/platform/bpsyc/gen3/test/vpc-id",
+        "publicSubnetIdsParameterName": "/platform/bpsyc/gen3/test/public-subnet-ids",
+        "proxiedSubnetIdsParameterName": "/platform/bpsyc/gen3/test/private-subnet-ids",
+        "vpcCidr": "10.144.0.0/20"
+      },
+      "proxy": {
+        "enabled": true,
+        "instanceType": "t3.small",
+        "allocateEips": true,
+        "removalPolicy": "RETAIN"
+      }
+    }
+  ]
+}

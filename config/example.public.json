@@ -1,0 +1,58 @@
+{
+  "project": "sample",
+  "application": "gen3",
+  "owner": "Platform",
+  "naming": {
+    "namePrefix": "sample-gen3",
+    "ssmPrefix": "/platform",
+    "secretPrefix": "platform"
+  },
+  "environments": {
+    "uat": {
+      "name": "uat",
+      "account": "111111111111",
+      "region": "ap-southeast-2"
+    },
+    "prod": {
+      "name": "prod",
+      "account": "222222222222",
+      "region": "ap-southeast-2"
+    }
+  },
+  "stages": [
+    {
+      "id": "SampleProxyUat",
+      "stageName": "UAT",
+      "envKey": "uat",
+      "networkLookup": {
+        "vpcIdParameterName": "/platform/sample/gen3/uat/vpc-id",
+        "publicSubnetIdsParameterName": "/platform/sample/gen3/uat/public-subnet-ids",
+        "proxiedSubnetIdsParameterName": "/platform/sample/gen3/uat/private-subnet-ids",
+        "vpcCidr": "10.13.0.0/16"
+      },
+      "proxy": {
+        "enabled": true,
+        "instanceType": "t3.small",
+        "allocateEips": true,
+        "removalPolicy": "RETAIN"
+      }
+    },
+    {
+      "id": "SampleProxyProd",
+      "stageName": "PROD",
+      "envKey": "prod",
+      "networkLookup": {
+        "vpcIdParameterName": "/platform/sample/gen3/prod/vpc-id",
+        "publicSubnetIdsParameterName": "/platform/sample/gen3/prod/public-subnet-ids",
+        "proxiedSubnetIdsParameterName": "/platform/sample/gen3/prod/private-subnet-ids",
+        "vpcCidr": "10.17.0.0/16"
+      },
+      "proxy": {
+        "enabled": true,
+        "instanceType": "t3.small",
+        "allocateEips": true,
+        "removalPolicy": "RETAIN"
+      }
+    }
+  ]
+}

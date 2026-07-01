@@ -1,0 +1,37 @@
+name: Deploy proxy
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Deployment target
+        required: true
+        type: choice
+        options:
+          - test
+          - prod
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-test:
+    if: ${{ inputs.target == 'test' }}
+    uses: AustralianBioCommons/gen3-proxy/.github/workflows/deploy-proxy-reusable.yml@main
+    with:
+      config_path: infra/proxy/proxy.json
+      github_environment: test
+      aws_region: ap-southeast-2
+      role_to_assume: arn:aws:iam::876128526180:role/github-actions-bpsyc-test
+      stack_selector: --all
+
+  deploy-prod:
+    if: ${{ inputs.target == 'prod' }}
+    uses: AustralianBioCommons/gen3-proxy/.github/workflows/deploy-proxy-reusable.yml@main
+    with:
+      config_path: infra/proxy/proxy.json
+      github_environment: prod
+      aws_region: ap-southeast-2
+      role_to_assume: arn:aws:iam::222222222222:role/github-actions-bpsyc-prod
+      stack_selector: --all

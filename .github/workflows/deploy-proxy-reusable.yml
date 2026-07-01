@@ -1,0 +1,144 @@
+name: Deploy proxy reusable
+
+on:
+  workflow_call:
+    inputs:
+      config_path:
+        description: Path to the proxy config file in the caller repository
+        required: true
+        type: string
+      github_environment:
+        description: GitHub Environment name
+        required: true
+        type: string
+      aws_region:
+        description: Default AWS region
+        required: false
+        type: string
+        default: ap-southeast-2
+      role_to_assume:
+        description: AWS IAM role ARN to assume with GitHub OIDC
+        required: true
+        type: string
+      stack_selector:
+        description: CDK stack selector
+        required: false
+        type: string
+        default: --all
+      caller_ref:
+        description: Optional git ref from the caller repo
+        required: false
+        type: string
+        default: ""
+    secrets: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.github_environment }}
+
+    concurrency:
+      group: proxy-${{ github.repository }}-${{ inputs.github_environment }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.caller_ref != '' && inputs.caller_ref || github.ref }}
+          path: caller
+
+      - name: Checkout gen3-proxy repo
+        uses: actions/checkout@v4
+        with:
+          repository: AustralianBioCommons/gen3-proxy
+          ref: main
+          path: proxy
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.role_to_assume }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Resolve AWS account id
+        id: aws_identity
+        run: |
+          echo "account_id=$(aws sts get-caller-identity --query Account --output text)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: proxy/package-lock.json
+
+      - name: Build runtime config
+        env:
+          CONFIG_PATH: caller/${{ inputs.config_path }}
+          OUTPUT_PATH: proxy/config.runtime.json
+          AWS_ACCOUNT_ID: ${{ steps.aws_identity.outputs.account_id }}
+          AWS_REGION: ${{ inputs.aws_region }}
+          TARGET_ENV: ${{ inputs.github_environment }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+
+          const inputPath = process.env.CONFIG_PATH;
+          const outputPath = process.env.OUTPUT_PATH;
+          const awsAccountId = process.env.AWS_ACCOUNT_ID;
+          const awsRegion = process.env.AWS_REGION;
+          const targetEnv = process.env.TARGET_ENV;
+
+          const config = JSON.parse(fs.readFileSync(inputPath, "utf8"));
+
+          // Inject real account ID + region wherever __ACCOUNT_ID__ is used
+          for (const [key, env] of Object.entries(config.environments || {})) {
+            if (!env.account || env.account === "__ACCOUNT_ID__") {
+              env.account = awsAccountId;
+            }
+            if (!env.region) {
+              env.region = awsRegion;
+            }
+            config.environments[key] = env;
+          }
+
+          if (!config.environments || !config.environments[targetEnv]) {
+            throw new Error(`No environment found for envKey='${targetEnv}'`);
+          }
+
+          // Filter stages to only the target environment
+          config.stages = (config.stages || []).filter(
+            (stage) => stage.envKey === targetEnv
+          );
+
+          if (config.stages.length === 0) {
+            throw new Error(`No stages found for envKey='${targetEnv}'`);
+          }
+
+          fs.writeFileSync(outputPath, JSON.stringify(config, null, 2));
+          console.log(`Wrote ${outputPath} with ${config.stages.length} stage(s)`);
+          NODE
+
+      - name: Show runtime config
+        run: cat proxy/config.runtime.json
+
+      - name: Install dependencies
+        working-directory: proxy
+        run: npm ci
+
+      - name: CDK synth
+        working-directory: proxy
+        run: npx cdk synth -c config=./config.runtime.json
+
+      - name: CDK deploy
+        working-directory: proxy
+        run: |
+          npx cdk deploy ${{ inputs.stack_selector }} \
+            --require-approval never \
+            -c config=./config.runtime.json
