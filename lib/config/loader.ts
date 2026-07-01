@@ -18,25 +18,11 @@ export function loadAppConfig(configPath: string): AppConfig {
   return config;
 }
 
-function resolveEnvironmentTarget(
-  environments: Record<string, EnvironmentTarget>,
-  envKey: string
-): EnvironmentTarget {
-  const resolved = environments[envKey];
-  if (!resolved) {
-    throw new Error(`Unknown envKey: ${envKey}`);
-  }
-  return resolved;
-}
-
 function resolveRemovalPolicy(value?: string): cdk.RemovalPolicy {
   switch ((value ?? "RETAIN").toUpperCase()) {
-    case "DESTROY":
-      return cdk.RemovalPolicy.DESTROY;
-    case "SNAPSHOT":
-      return cdk.RemovalPolicy.SNAPSHOT;
-    default:
-      return cdk.RemovalPolicy.RETAIN;
+    case "DESTROY": return cdk.RemovalPolicy.DESTROY;
+    case "SNAPSHOT": return cdk.RemovalPolicy.SNAPSHOT;
+    default: return cdk.RemovalPolicy.RETAIN;
   }
 }
 
@@ -53,9 +39,13 @@ function resolveProxyConfig(proxy: ProxyConfig): ResolvedProxyConfig {
 
 export function resolveStageConfig(
   appConfig: AppConfig,
-  stage: StageConfig
+  stage: StageConfig,
+  proxiedSubnetIds: string[]   // fetched from SSM by the entrypoint
 ): ResolvedStageConfig {
-  const envTarget = resolveEnvironmentTarget(appConfig.environments, stage.envKey);
+  const envTarget = appConfig.environments[stage.envKey];
+  if (!envTarget) {
+    throw new Error(`stage ${stage.id}: envKey '${stage.envKey}' not found in environments`);
+  }
 
   return {
     id: stage.id,
@@ -63,11 +53,11 @@ export function resolveStageConfig(
     envTarget,
     networkLookup: {
       vpcId: stage.networkLookup.vpcId,
-      vpcIdParameterName: stage.networkLookup.vpcIdParameterName,
-      proxiedSubnetIdsParameterName: stage.networkLookup.proxiedSubnetIdsParameterName,
       publicSubnetIdsParameterName: stage.networkLookup.publicSubnetIdsParameterName,
+      proxiedSubnetIdsParameterName: stage.networkLookup.proxiedSubnetIdsParameterName,
       vpcCidr: stage.networkLookup.vpcCidr,
       availabilityZones: stage.networkLookup.availabilityZones,
+      proxiedSubnetIds,   // concrete, resolved from SSM
     },
     proxy: resolveProxyConfig(stage.proxy),
     requireManualApproval: stage.approvals?.requireManualApproval ?? false,

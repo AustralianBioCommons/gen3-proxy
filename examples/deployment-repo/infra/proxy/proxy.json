@@ -25,7 +25,12 @@
       "stageName": "TEST",
       "envKey": "test",
       "networkLookup": {
-        "vpcIdParameterName": "/platform/bpsyc/gen3/test/vpc-id",
+        "vpcId": "vpc-abcd1234efgh5678",
+        "availabilityZones": [
+          "ap-southeast-2a",
+          "ap-southeast-2b",
+          "ap-southeast-2c"
+        ],
         "publicSubnetIdsParameterName": "/platform/bpsyc/gen3/test/public-subnet-ids",
         "proxiedSubnetIdsParameterName": "/platform/bpsyc/gen3/test/private-subnet-ids",
         "vpcCidr": "10.144.0.0/20"

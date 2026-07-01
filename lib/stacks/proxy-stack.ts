@@ -25,52 +25,15 @@ export class ProxyStack extends cdk.Stack {
     const qualifiedName = `${props.namePrefix}-${envName}`;
 
     // -------------------------------------------------------------------------
-    // Network: resolve VPC + subnets
-    //
-    // Vpc.fromLookup() and Vpc.fromVpcAttributes() both require a *concrete*
-    // VPC ID at synth time — SSM tokens (cdk.Token) are rejected.
-    // We therefore take vpcId as a literal string in the config (same approach
-    // gen3-search uses for availabilityZones).
-    //
-    // Subnet IDs *can* be SSM tokens because ec2.Subnet.fromSubnetId() and the
-    // ASG vpcSubnets accept CFN tokens — they're only resolved at deploy time.
-    // We follow the exact same Fn.split / Fn.select pattern as gen3-search.
+    // Network: Vpc.fromLookup — identical to the original squid-aws-proxy.
+    // Requires cdk.context.json to be populated (committed to the repo).
+    // This gives full subnet metadata at synth time so:
+    //   - vpc.availabilityZones works for the ASG forEach loop
+    //   - SubnetType.PUBLIC works for ASG subnet selection
+    //   - subnet.routeTable.routeTableId works for the RouteTableIds tag
     // -------------------------------------------------------------------------
-
-    const azCount = props.networkLookup.availabilityZones.length;
-
-    // Public subnets — where proxy EC2 instances are placed
-    const publicSubnetIdsRaw = ssm.StringParameter.valueForStringParameter(
-      this,
-      props.networkLookup.publicSubnetIdsParameterName
-    );
-    const publicSubnetIds = cdk.Fn.split(",", publicSubnetIdsRaw);
-
-    // Proxied subnets — whose route tables the Lambda updates on failover.
-    // The Lambda reads the SSM param name from the ASG tag and calls
-    // ec2:DescribeSubnets at runtime to get actual route table IDs.
-    const proxiedSubnetIdsRaw = ssm.StringParameter.valueForStringParameter(
-      this,
-      props.networkLookup.proxiedSubnetIdsParameterName
-    );
-
-    // Build concrete Subnet objects for each public AZ slot using Fn::Select.
-    // These are used in vpcSubnets on the ASG — CDK accepts token subnet IDs here.
-    const publicSubnets = Array.from({ length: azCount }, (_, i) =>
-      ec2.Subnet.fromSubnetId(
-        this,
-        `PublicSubnet${i}`,
-        cdk.Fn.select(i, publicSubnetIds)
-      )
-    );
-
-    // Vpc.fromVpcAttributes accepts token vpcId only if we do NOT pass subnet
-    // arrays (which trigger AZ-count validation at synth time).
-    // We pass the concrete vpcId from config and placeholder AZs so the VPC
-    // object can be used for security-group / CIDR references.
-    const vpc = ec2.Vpc.fromVpcAttributes(this, "Vpc", {
+    const vpc = ec2.Vpc.fromLookup(this, "Vpc", {
       vpcId: props.networkLookup.vpcId,
-      availabilityZones: props.networkLookup.availabilityZones,
     });
 
     // -------------------------------------------------------------------------
@@ -191,7 +154,6 @@ export class ProxyStack extends cdk.Stack {
           "ec2:CreateTags",
           "ec2:Describe*",
           "ec2:ReplaceRoute",
-          "ssm:GetParameter",       // resolve proxied subnet IDs → route tables
         ],
         resources: ["*"],
       })
@@ -223,7 +185,7 @@ export class ProxyStack extends cdk.Stack {
 
     const squidAsgs: autoscaling.AutoScalingGroup[] = [];
 
-    props.networkLookup.availabilityZones.forEach((az, index) => {
+    vpc.availabilityZones.forEach((az, index) => {
       // Security group for this proxy instance
       const sg = new ec2.SecurityGroup(this, `ProxySg${index}`, {
         vpc,
@@ -273,10 +235,10 @@ export class ProxyStack extends cdk.Stack {
         desiredCapacity: 1,
         minCapacity: 1,
         maxCapacity: 1,
-        // Use the explicit subnet object derived from the SSM token via Fn::Select.
-        // Passing a SubnetType would trigger a VPC subnet lookup at synth time,
-        // which fails when the VPC has no real subnet metadata (fromVpcAttributes).
-        vpcSubnets: { subnets: [publicSubnets[index]] },
+        vpcSubnets: {
+          subnetType: ec2.SubnetType.PUBLIC,
+          availabilityZones: [az],
+        },
         healthChecks: autoscaling.HealthChecks.ec2({
           gracePeriod: cdk.Duration.minutes(8),
         }),
@@ -357,17 +319,22 @@ export class ProxyStack extends cdk.Stack {
         heartbeatTimeout: cdk.Duration.minutes(5),
       });
 
-      // Tag the ASG with the proxied route-table IDs so the Lambda can find them.
-      // We derive these from the SSM-sourced subnet list via Fn::Split + Fn::Select.
-      // The Lambda reads this tag to know which route tables to update.
-      // We store the raw SSM token — the Lambda will resolve the actual route table
-      // IDs from the subnet IDs at runtime using ec2:DescribeSubnets.
-      cdk.Tags.of(asg).add(
-        "ProxiedSubnetIdsParam",
-        props.networkLookup.proxiedSubnetIdsParameterName,
-        { applyToLaunchedInstances: false }
-      );
-      cdk.Tags.of(asg).add("AzIndex", String(index), {
+      // Derive route table IDs from proxied subnet IDs at synth time —
+      // identical to the original squid-aws-proxy approach.
+      // vpc.fromVpcAttributes + cdk.context.json gives us real subnet metadata
+      // so subnet.routeTable.routeTableId resolves to a concrete string.
+      const selection = vpc.selectSubnets({
+        subnetFilters: [ec2.SubnetFilter.byIds(props.networkLookup.proxiedSubnetIds)],
+      });
+
+      let routeTableIds = '';
+      selection.subnets!.forEach((subnet) => {
+        routeTableIds = routeTableIds
+          ? `${routeTableIds},${subnet.routeTable.routeTableId}`
+          : subnet.routeTable.routeTableId;
+      });
+
+      cdk.Tags.of(asg).add('RouteTableIds', routeTableIds, {
         applyToLaunchedInstances: false,
       });
 

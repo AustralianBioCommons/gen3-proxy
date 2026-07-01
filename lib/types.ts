@@ -1,9 +1,5 @@
 import * as cdk from "aws-cdk-lib";
 
-// ---------------------------------------------------------------------------
-// Config file types (what the caller repo's proxy.json contains)
-// ---------------------------------------------------------------------------
-
 export interface EnvironmentTarget {
   name: string;
   account: string;
@@ -36,48 +32,25 @@ export interface StageConfig {
 }
 
 export interface NetworkLookupConfig {
-  /**
-   * The concrete VPC ID (e.g. "vpc-0abc1234").
-   * Must be a literal string — Vpc.fromVpcAttributes / Vpc.fromLookup cannot
-   * accept SSM tokens at synth time.
-   */
   vpcId: string;
-  /** SSM param name containing the VPC ID (used for CfnOutput reference only). */
-  vpcIdParameterName?: string;
-  /**
-   * SSM param name containing a comma-separated list of private/isolated subnet
-   * IDs whose route tables the proxy will update (the "proxied" subnets).
-   */
-  proxiedSubnetIdsParameterName: string;
-  /**
-   * SSM param name containing a comma-separated list of public subnet IDs where
-   * the proxy EC2 instances will be launched.
-   */
+  /** SSM param name containing a comma-separated list of public subnet IDs. */
   publicSubnetIdsParameterName: string;
+  /** SSM param name containing a comma-separated list of private/isolated subnet IDs. */
+  proxiedSubnetIdsParameterName: string;
   /** VPC CIDR — used for security-group ingress rules. */
   vpcCidr: string;
   /**
-   * Availability zones for the VPC — must match the number of public subnets.
+   * Availability zones — must match the VPC's AZs.
    * Required because Vpc.fromVpcAttributes needs concrete AZ strings at synth time.
-   * e.g. ["ap-southeast-2a", "ap-southeast-2b", "ap-southeast-2c"]
    */
   availabilityZones: string[];
 }
 
 export interface ProxyConfig {
   enabled: boolean;
-  /** EC2 instance type for Squid proxy hosts. Defaults to t3.small. */
   instanceType?: string;
-  /**
-   * Whether to allocate an Elastic IP for each proxy instance (one per AZ).
-   * When true the EIPs are allocated and associated via the launch-template
-   * user-data / instance-lifecycle hook; their public IPs are written to SSM.
-   * Defaults to true.
-   */
   allocateEips?: boolean;
-  /** Squid config files to sync from S3. Defaults to assets/config_files. */
   configFilesPath?: string;
-  /** CloudWatch log group name prefix. Defaults to /gen3-proxy. */
   logGroupPrefix?: string;
   removalPolicy?: "DESTROY" | "RETAIN" | "SNAPSHOT";
 }
@@ -86,17 +59,18 @@ export interface ApprovalConfig {
   requireManualApproval?: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// Resolved / runtime types (after loader has applied defaults)
-// ---------------------------------------------------------------------------
-
 export interface ResolvedNetworkLookupConfig {
   vpcId: string;
-  vpcIdParameterName?: string;
-  proxiedSubnetIdsParameterName: string;
   publicSubnetIdsParameterName: string;
+  proxiedSubnetIdsParameterName: string;
   vpcCidr: string;
   availabilityZones: string[];
+  /**
+   * Concrete subnet IDs fetched from SSM at synth time (in deploy-proxy.ts).
+   * Used with vpc.selectSubnets() to derive route table IDs — identical to
+   * the original squid-aws-proxy proxiedSubnets approach.
+   */
+  proxiedSubnetIds: string[];
 }
 
 export interface ResolvedProxyConfig {
@@ -116,10 +90,6 @@ export interface ResolvedStageConfig {
   proxy: ResolvedProxyConfig;
   requireManualApproval: boolean;
 }
-
-// ---------------------------------------------------------------------------
-// CDK Stack props
-// ---------------------------------------------------------------------------
 
 export interface BaseNamingProps {
   project: string;
