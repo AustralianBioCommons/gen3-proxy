@@ -191,6 +191,7 @@ export class ProxyStack extends cdk.Stack {
           "ec2:CreateTags",
           "ec2:Describe*",
           "ec2:ReplaceRoute",
+          "ssm:GetParameter",       // resolve proxied subnet IDs → route tables
         ],
         resources: ["*"],
       })
@@ -388,7 +389,12 @@ export class ProxyStack extends cdk.Stack {
         alarmDescription: `Squid heartbeat for ${qualifiedName} AZ${index + 1}`,
         comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_OR_EQUAL_TO_THRESHOLD,
         metric: squidMetric,
-        evaluationPeriods: 1,
+        // 3 evaluation periods × 5 min = 15 min before alarming.
+        // This gives a newly-launched instance time for the CW agent to start
+        // and emit its first procstat_cpu_usage datapoint, avoiding a false
+        // ALARM→route-failover on every deployment.
+        evaluationPeriods: 3,
+        datapointsToAlarm: 3,
         threshold: 0,
         treatMissingData: cloudwatch.TreatMissingData.BREACHING,
       });
