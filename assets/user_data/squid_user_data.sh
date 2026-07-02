@@ -124,13 +124,14 @@ cat >/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'EOF'
     "append_dimensions": {
       "AutoScalingGroupName": "${aws:AutoScalingGroupName}"
     },
+    "aggregation_dimensions": [
+      ["AutoScalingGroupName"]
+    ],
     "metrics_collected": {
       "procstat": [
         {
           "pid_file": "/var/run/squid.pid",
-          "measurement": [
-            "cpu_usage"
-          ]
+          "measurement": ["cpu_usage"]
         }
       ]
     },
