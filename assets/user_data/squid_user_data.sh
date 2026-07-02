@@ -26,6 +26,63 @@ aws ec2 modify-instance-attribute \
   --region __REGION__ || true
 
 ###############################################################################
+# Elastic IP
+###############################################################################
+
+SSM_EIP_PARAM="__SSM_EIP_PARAM__"
+
+EXISTING_ALLOC_ID=$(aws ssm get-parameter \
+  --name "${SSM_EIP_PARAM}-allocation-id" \
+  --query "Parameter.Value" \
+  --output text \
+  --region __REGION__ 2>/dev/null || true)
+
+if [ -n "$EXISTING_ALLOC_ID" ] && [ "$EXISTING_ALLOC_ID" != "None" ]; then
+  echo "Reusing existing EIP: $EXISTING_ALLOC_ID"
+  ALLOC_ID="$EXISTING_ALLOC_ID"
+else
+  echo "Allocating new EIP..."
+  ALLOC_ID=$(aws ec2 allocate-address \
+    --domain vpc \
+    --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=__ASG_NAME__},{Key=Project,Value=__PROJECT__},{Key=Application,Value=__APPLICATION__},{Key=Environment,Value=__ENV_NAME__}]" \
+    --query "AllocationId" \
+    --output text \
+    --region __REGION__ 2>/dev/null || true)
+
+  if [ -n "$ALLOC_ID" ]; then
+    PUBLIC_IP=$(aws ec2 describe-addresses \
+      --allocation-ids "$ALLOC_ID" \
+      --query "Addresses[0].PublicIp" \
+      --output text \
+      --region __REGION__)
+
+    aws ssm put-parameter \
+      --name "${SSM_EIP_PARAM}-allocation-id" \
+      --value "$ALLOC_ID" \
+      --type String --overwrite \
+      --region __REGION__ || true
+
+    aws ssm put-parameter \
+      --name "${SSM_EIP_PARAM}" \
+      --value "$PUBLIC_IP" \
+      --type String --overwrite \
+      --description "Proxy EIP for __ASG_NAME__" \
+      --region __REGION__ || true
+
+    echo "Allocated EIP $PUBLIC_IP ($ALLOC_ID)"
+  fi
+fi
+
+if [ -n "${ALLOC_ID:-}" ]; then
+  aws ec2 associate-address \
+    --instance-id "$INSTANCE_ID" \
+    --allocation-id "$ALLOC_ID" \
+    --allow-reassociation \
+    --region __REGION__ || true
+  echo "Associated $ALLOC_ID with $INSTANCE_ID"
+fi
+
+###############################################################################
 # Squid
 ###############################################################################
 
