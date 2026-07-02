@@ -290,6 +290,8 @@ export class ProxyStack extends cdk.Stack {
         "utf-8"
       );
 
+      const eipSsmParam = `${props.ssmPrefix}/${props.project}/${props.application}/${envName}/proxy-eip-${index}`;
+
       const userDataStr = userDataTemplate
         .replace(/__S3BUCKET__/g, configBucket.bucketName)
         .replace(/__ASG__/g, asgLogicalId)
@@ -297,6 +299,7 @@ export class ProxyStack extends cdk.Stack {
         .replace(/__CW_ASG__/g, asgName)
         .replace(/__AZ_INDEX__/g, String(index))
         .replace(/__ENV_NAME__/g, envName)
+        .replace(/__SSM_EIP_PARAM__/g, eipSsmParam)
         .replace(/__SSM_PREFIX__/g, props.ssmPrefix)
         .replace(/__PROJECT__/g, props.project)
         .replace(/__APPLICATION__/g, props.application)
