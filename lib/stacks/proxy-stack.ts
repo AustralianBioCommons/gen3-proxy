@@ -11,7 +11,6 @@ import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as cwActions from "aws-cdk-lib/aws-cloudwatch-actions";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as snsSubs from "aws-cdk-lib/aws-sns-subscriptions";
-import * as hooktargets from "aws-cdk-lib/aws-autoscaling-hooktargets";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import { readFileSync } from "fs";
 import * as path from "path";
@@ -87,7 +86,6 @@ export class ProxyStack extends cdk.Stack {
           "ec2:DescribeAddresses",
           "ssm:GetParameter",
           "ssm:PutParameter",
-          "ec2:createTags",
         ],
         resources: ["*"],
       })
@@ -285,19 +283,16 @@ export class ProxyStack extends cdk.Stack {
 
       asg.addUserData(userDataStr);
 
-      // Lifecycle hook — Lambda completes it once the alarm transitions to OK.
-      // Heartbeat timeout must be longer than the time for:
-      //   instance boot + Squid install + CW agent start + first metric emission
-      //   + alarm evaluation period (1 × 5 min) = ~15-20 min total.
-      // We use 25 minutes to give comfortable headroom.
-      const hookTopic = new sns.Topic(this, `LifecycleHookTopic${index}`, {
-        displayName: `${qualifiedName} ASG${index + 1} Lifecycle Hook`,
-      });
-
+      // Lifecycle hook — holds the instance in Pending:Wait until the alarm
+      // transitions to OK and the Lambda calls complete_lifecycle_action.
+      // We use QueueHook with a dummy SQS queue rather than TopicHook because
+      // TopicHook automatically subscribes the notification target (Lambda) to
+      // the hook topic, causing lifecycle hook messages to be delivered to the
+      // alarm Lambda which only expects CloudWatch alarm messages.
+      // The Lambda completes the hook via the autoscaling API directly on OK.
       new autoscaling.LifecycleHook(this, `LifecycleHook${index}`, {
         autoScalingGroup: asg,
         lifecycleTransition: autoscaling.LifecycleTransition.INSTANCE_LAUNCHING,
-        notificationTarget: new hooktargets.TopicHook(hookTopic),
         defaultResult: autoscaling.DefaultResult.ABANDON,
         heartbeatTimeout: cdk.Duration.minutes(25),
       });
@@ -331,6 +326,7 @@ export class ProxyStack extends cdk.Stack {
         namespace: "CWAgent",
         metricName: "procstat_cpu_usage",
         dimensionsMap: {
+          AutoScalingGroupName: asgName,
           pidfile: "/var/run/squid.pid",
           process_name: "squid",
         },
@@ -339,13 +335,15 @@ export class ProxyStack extends cdk.Stack {
       const alarm = new cloudwatch.Alarm(this, `SquidAlarm${index}`, {
         alarmName: `squid-alarm_${asgName}`,
         alarmDescription: `Squid heartbeat for ${qualifiedName} AZ${index + 1}`,
-        comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_OR_EQUAL_TO_THRESHOLD,
+        comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
         metric: squidMetric,
-        // 1 evaluation period — the lifecycle hook holds the instance in
-        // Pending:Wait, so a false ALARM on startup doesn't cause a loop.
-        // The Lambda completes the hook (CONTINUE) on OK, moving the instance
-        // to InService and updating the route tables — identical to the original.
-        evaluationPeriods: 1,
+        // 3 evaluation periods × 5 min = 15 min of missing data before alarming.
+        // Gives newly-launched instances time to boot, start CW agent, and emit
+        // the first procstat metric — avoiding false ALARM storms on deployment.
+        // The lifecycle hook (25 min timeout) holds the instance in Pending:Wait
+        // until the alarm goes OK regardless of evaluation periods.
+        evaluationPeriods: 3,
+        datapointsToAlarm: 3,
         threshold: 0,
         treatMissingData: cloudwatch.TreatMissingData.BREACHING,
       });
