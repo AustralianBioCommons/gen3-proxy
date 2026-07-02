@@ -293,7 +293,8 @@ export class ProxyStack extends cdk.Stack {
       const userDataStr = userDataTemplate
         .replace(/__S3BUCKET__/g, configBucket.bucketName)
         .replace(/__ASG__/g, asgLogicalId)
-        .replace(/__ASG_NAME__/g, asgName)           // concrete — no CFN Ref
+        .replace(/__ASG_NAME__/g, asgName)
+        .replace(/__CW_ASG__/g, asgName)
         .replace(/__AZ_INDEX__/g, String(index))
         .replace(/__ENV_NAME__/g, envName)
         .replace(/__SSM_PREFIX__/g, props.ssmPrefix)
