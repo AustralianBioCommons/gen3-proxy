@@ -316,6 +316,8 @@ export class ProxyStack extends cdk.Stack {
         displayName: `${qualifiedName} ASG${index + 1} Lifecycle Hook`,
       });
 
+      hookTopic.addSubscription(new snsSubs.LambdaSubscription(alarmFn));
+
       new autoscaling.LifecycleHook(this, `LifecycleHook${index}`, {
         autoScalingGroup: asg,
         lifecycleTransition: autoscaling.LifecycleTransition.INSTANCE_LAUNCHING,
