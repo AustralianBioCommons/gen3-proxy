@@ -35,7 +35,7 @@ EXISTING_ALLOC_ID=$(aws ssm get-parameter \
   --name "${SSM_EIP_PARAM}-allocation-id" \
   --query "Parameter.Value" \
   --output text \
-  --region __REGION__ 2>/dev/null || true)
+  --region __REGION__)
 
 if [ -n "$EXISTING_ALLOC_ID" ] && [ "$EXISTING_ALLOC_ID" != "None" ]; then
   echo "Reusing existing EIP: $EXISTING_ALLOC_ID"
@@ -44,10 +44,18 @@ else
   echo "Allocating new EIP..."
   ALLOC_ID=$(aws ec2 allocate-address \
     --domain vpc \
-    --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=__ASG_NAME__},{Key=Project,Value=__PROJECT__},{Key=Application,Value=__APPLICATION__},{Key=Environment,Value=__ENV_NAME__}]" \
     --query "AllocationId" \
     --output text \
-    --region __REGION__ 2>/dev/null || true)
+    --region __REGION__)
+
+  aws ec2 create-tags \
+    --resources "$ALLOC_ID" \
+    --tags \
+      Key=Name,Value=__ASG_NAME__ \
+      Key=Project,Value=__PROJECT__ \
+      Key=Application,Value=__APPLICATION__ \
+      Key=Environment,Value=__ENV_NAME__ \
+    --region __REGION__
 
   if [ -n "$ALLOC_ID" ]; then
     PUBLIC_IP=$(aws ec2 describe-addresses \

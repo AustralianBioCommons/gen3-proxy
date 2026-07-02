@@ -87,6 +87,7 @@ export class ProxyStack extends cdk.Stack {
             "ec2:AssociateAddress",
             "ec2:DescribeAddresses",
             "ec2:DescribeInstances",
+            "ec2:CreateTags"
           ],
           resources: ["*"],
         })
