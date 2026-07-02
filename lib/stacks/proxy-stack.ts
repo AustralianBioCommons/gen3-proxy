@@ -355,7 +355,7 @@ export class ProxyStack extends cdk.Stack {
       const alarm = new cloudwatch.Alarm(this, `SquidAlarm${index}`, {
         alarmName: `squid-alarm_${asgName}`,
         alarmDescription: `Squid heartbeat for ${qualifiedName} AZ${index + 1}`,
-        comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_OR_EQUAL_TO_THRESHOLD,
+        comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
         metric: squidMetric,
         // 3 evaluation periods × 5 min = 15 min before alarming.
         // This gives a newly-launched instance time for the CW agent to start

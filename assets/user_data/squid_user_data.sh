@@ -122,7 +122,7 @@ cat >/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'EOF'
   },
   "metrics": {
     "append_dimensions": {
-      "AutoScalingGroupName": "__CW_ASG__"
+      "AutoScalingGroupName": "${aws:AutoScalingGroupName}"
     },
     "metrics_collected": {
       "procstat": [
