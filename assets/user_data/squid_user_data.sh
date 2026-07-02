@@ -14,7 +14,7 @@ yum makecache || true
 yum update -y --security || true
 # Networking attribute (non-fatal if already set)
 instanceid=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
-aws ec2 modify-instance-attribute --no-source-dest-check --instance-id "$instanceid" --region ${AWS::Region} || true
+aws ec2 modify-instance-attribute --no-source-dest-check --instance-id "$instanceid" --region __REGION__ || true
 # ---- Squid: install first, then update to patched build ----
 yum install -y squid || OVERALL_STATUS=1
 yum update  -y squid || OVERALL_STATUS=1
@@ -53,7 +53,7 @@ EOF
 crontab ~/mycron
 rm -f ~/mycron
 # CloudWatch Agent (non-fatal if mirror hiccups)
-rpm -Uvh https://amazoncloudwatch-agent-${AWS::Region}.s3.${AWS::Region}.amazonaws.com/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm || true
+rpm -Uvh https://amazoncloudwatch-agent-__REGION__.s3.__REGION__.amazonaws.com/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm || true
 cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'EOF'
 {
   "agent": { "metrics_collection_interval": 10, "omit_hostname": true },
@@ -73,4 +73,4 @@ EOF
 /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s || true
 # Always signal CloudFormation with overall status (0=success, 1=failure)
 yum update -y aws-cfn-bootstrap || true
-/opt/aws/bin/cfn-signal -e "$OVERALL_STATUS" --stack ${AWS::StackName} --resource "${__ASG__}" --region ${AWS::Region}
+/opt/aws/bin/cfn-signal -e "$OVERALL_STATUS" --stack __STACK_NAME__ --resource "${__ASG__}" --region __REGION__
