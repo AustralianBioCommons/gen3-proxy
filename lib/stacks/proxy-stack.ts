@@ -68,7 +68,7 @@ export class ProxyStack extends cdk.Stack {
       ],
     });
 
-    // Allow source-dest-check disable and route table mutation (NAT behaviour)
+    // Allow source-dest-check disable
     instanceRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -77,32 +77,21 @@ export class ProxyStack extends cdk.Stack {
       })
     );
 
-    // Allow EIP allocation + association from user data (when allocateEips=true)
-    if (props.proxy.allocateEips) {
-      instanceRole.addToPolicy(
-        new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
-          actions: [
-            "ec2:AllocateAddress",
-            "ec2:AssociateAddress",
-            "ec2:DescribeAddresses",
-            "ec2:DescribeInstances",
-            "ec2:CreateTags"
-          ],
-          resources: ["*"],
-        })
-      );
-      // Allow writing EIP public IPs to SSM so consumers can allowlist them
-      instanceRole.addToPolicy(
-        new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
-          actions: ["ssm:PutParameter", "ssm:GetParameter"],
-          resources: [
-            `arn:aws:ssm:${this.region}:${this.account}:parameter${props.ssmPrefix}/${props.project}/${props.application}/${envName}/proxy-eip-*`,
-          ],
-        })
-      );
-    }
+    // EIP allocation, association and SSM publishing
+    instanceRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "ec2:AllocateAddress",
+          "ec2:AssociateAddress",
+          "ec2:DescribeAddresses",
+          "ssm:GetParameter",
+          "ssm:PutParameter",
+          "ec2:createTags",
+        ],
+        resources: ["*"],
+      })
+    );
 
     configBucket.grantReadWrite(instanceRole);
 
@@ -268,62 +257,49 @@ export class ProxyStack extends cdk.Stack {
       const cfnAsg = asg.node.defaultChild as autoscaling.CfnAutoScalingGroup;
       const asgLogicalId = cfnAsg.logicalId;
 
-      // Apply CreationPolicy directly on the CfnAutoScalingGroup so CFN waits
-      // for cfn-signal from user-data before marking the resource complete.
-      // We do this at the L1 level rather than via autoscaling.Signals (L2)
-      // because Signals.waitForAll() adds cross-ASG DependsOn edges that create
-      // the circular dependency with lifecycle hooks and alarms.
       cfnAsg.cfnOptions.creationPolicy = {
-        resourceSignal: {
-          count: 1,
-          timeout: "PT15M",
-        },
+        resourceSignal: { count: 1, timeout: "PT30M" },
       };
-
-      // this.stackName is always a CFN token ({"Ref":"AWS::StackName"}) even
-      // when stackName is passed explicitly — CDK never inlines it as a literal.
-      // We reconstruct the concrete name from the construct id (set in deploy-proxy.ts
-      // to `${stageConfig.id}Proxy`, matching the stackName prop passed there).
-      const concreteStackName = this.artifactId;
 
       const userDataTemplate = readFileSync(
         path.join(__dirname, "../../assets/user_data/squid_user_data.sh"),
         "utf-8"
       );
 
+      // Plain string replacement — no Fn::Sub, no CDK tokens.
+      // ${aws:AutoScalingGroupName} in the CW agent config is inside a
+      // single-quoted heredoc (<< 'EOF') so the shell never expands it;
+      // the CW agent resolves it at runtime via EC2 instance metadata.
       const eipSsmParam = `${props.ssmPrefix}/${props.project}/${props.application}/${envName}/proxy-eip-${index}`;
 
       const userDataStr = userDataTemplate
-        .replace(/__S3BUCKET__/g, configBucket.bucketName)
+        .replace(/__REGION__/g, props.envTarget.region)
+        .replace(/__STACK_NAME__/g, this.artifactId)
         .replace(/__ASG__/g, asgLogicalId)
         .replace(/__ASG_NAME__/g, asgName)
-        .replace(/__CW_ASG__/g, asgName)
-        .replace(/__AZ_INDEX__/g, String(index))
-        .replace(/__ENV_NAME__/g, envName)
+        .replace(/__S3BUCKET__/g, configBucket.bucketName)
         .replace(/__SSM_EIP_PARAM__/g, eipSsmParam)
-        .replace(/__SSM_PREFIX__/g, props.ssmPrefix)
         .replace(/__PROJECT__/g, props.project)
         .replace(/__APPLICATION__/g, props.application)
-        .replace(/__ALLOCATE_EIPS__/g, props.proxy.allocateEips ? "true" : "false")
-        // Concrete at synth time — no CDK tokens, no Fn::Sub generated
-        .replace(/__REGION__/g, props.envTarget.region)
-        .replace(/__STACK_NAME__/g, concreteStackName);
+        .replace(/__ENV_NAME__/g, envName);
 
       asg.addUserData(userDataStr);
 
-      // Lifecycle hook — Lambda completes it once routing is confirmed healthy
+      // Lifecycle hook — Lambda completes it once the alarm transitions to OK.
+      // Heartbeat timeout must be longer than the time for:
+      //   instance boot + Squid install + CW agent start + first metric emission
+      //   + alarm evaluation period (1 × 5 min) = ~15-20 min total.
+      // We use 25 minutes to give comfortable headroom.
       const hookTopic = new sns.Topic(this, `LifecycleHookTopic${index}`, {
         displayName: `${qualifiedName} ASG${index + 1} Lifecycle Hook`,
       });
-
-      hookTopic.addSubscription(new snsSubs.LambdaSubscription(alarmFn));
 
       new autoscaling.LifecycleHook(this, `LifecycleHook${index}`, {
         autoScalingGroup: asg,
         lifecycleTransition: autoscaling.LifecycleTransition.INSTANCE_LAUNCHING,
         notificationTarget: new hooktargets.TopicHook(hookTopic),
         defaultResult: autoscaling.DefaultResult.ABANDON,
-        heartbeatTimeout: cdk.Duration.minutes(5),
+        heartbeatTimeout: cdk.Duration.minutes(25),
       });
 
       // Derive route table IDs from proxied subnet IDs at synth time —
@@ -346,13 +322,15 @@ export class ProxyStack extends cdk.Stack {
       });
 
       // CloudWatch alarm — breaches when Squid process CPU disappears.
-      // Both dimensionsMap and alarmName use the concrete asgName string,
-      // so there is no CFN Ref to the ASG resource here — no circular dep.
+      // Dimensions match exactly what the CW agent publishes for procstat:
+      // only pidfile and process_name — AutoScalingGroupName is NOT included
+      // because newer CW agent versions don't propagate append_dimensions to
+      // procstat metrics. The alarm name still encodes the ASG name for the
+      // Lambda to parse.
       const squidMetric = new cloudwatch.Metric({
         namespace: "CWAgent",
         metricName: "procstat_cpu_usage",
         dimensionsMap: {
-          AutoScalingGroupName: asgName,
           pidfile: "/var/run/squid.pid",
           process_name: "squid",
         },
@@ -361,14 +339,13 @@ export class ProxyStack extends cdk.Stack {
       const alarm = new cloudwatch.Alarm(this, `SquidAlarm${index}`, {
         alarmName: `squid-alarm_${asgName}`,
         alarmDescription: `Squid heartbeat for ${qualifiedName} AZ${index + 1}`,
-        comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_OR_EQUAL_TO_THRESHOLD,
         metric: squidMetric,
-        // 3 evaluation periods × 5 min = 15 min before alarming.
-        // This gives a newly-launched instance time for the CW agent to start
-        // and emit its first procstat_cpu_usage datapoint, avoiding a false
-        // ALARM→route-failover on every deployment.
-        evaluationPeriods: 3,
-        datapointsToAlarm: 3,
+        // 1 evaluation period — the lifecycle hook holds the instance in
+        // Pending:Wait, so a false ALARM on startup doesn't cause a loop.
+        // The Lambda completes the hook (CONTINUE) on OK, moving the instance
+        // to InService and updating the route tables — identical to the original.
+        evaluationPeriods: 1,
         threshold: 0,
         treatMissingData: cloudwatch.TreatMissingData.BREACHING,
       });
