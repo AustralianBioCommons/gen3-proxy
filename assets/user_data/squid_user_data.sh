@@ -4,7 +4,17 @@
 exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
 
 OVERALL_STATUS=0
-trap 'OVERALL_STATUS=1' ERR
+
+# Always signal CloudFormation on exit, regardless of how the script ends.
+# This ensures CFN never times out waiting for a signal.
+signal_cfn() {
+  /opt/aws/bin/cfn-signal \
+    -e "$OVERALL_STATUS" \
+    --stack __STACK_NAME__ \
+    --resource __ASG__ \
+    --region __REGION__ || true
+}
+trap 'OVERALL_STATUS=$?; signal_cfn' EXIT
 
 ###############################################################################
 # System updates
@@ -18,7 +28,12 @@ yum update -y --security || true
 # Disable Source/Dest Check
 ###############################################################################
 
-INSTANCE_ID=$(curl -fsS http://169.254.169.254/latest/meta-data/instance-id)
+# Retry IMDS call — metadata service may not be ready immediately at boot
+for i in 1 2 3 4 5; do
+  INSTANCE_ID=$(curl -fsS http://169.254.169.254/latest/meta-data/instance-id) && break
+  echo "IMDS not ready, retry $i/5..."
+  sleep 3
+done
 
 aws ec2 modify-instance-attribute \
   --instance-id "$INSTANCE_ID" \
@@ -35,7 +50,7 @@ EXISTING_ALLOC_ID=$(aws ssm get-parameter \
   --name "${SSM_EIP_PARAM}-allocation-id" \
   --query "Parameter.Value" \
   --output text \
-  --region __REGION__)
+  --region __REGION__ 2>/dev/null || true)
 
 if [ -n "$EXISTING_ALLOC_ID" ] && [ "$EXISTING_ALLOC_ID" != "None" ]; then
   echo "Reusing existing EIP: $EXISTING_ALLOC_ID"
@@ -44,18 +59,10 @@ else
   echo "Allocating new EIP..."
   ALLOC_ID=$(aws ec2 allocate-address \
     --domain vpc \
+    --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=__ASG_NAME__},{Key=Project,Value=__PROJECT__},{Key=Application,Value=__APPLICATION__},{Key=Environment,Value=__ENV_NAME__}]" \
     --query "AllocationId" \
     --output text \
-    --region __REGION__)
-
-  aws ec2 create-tags \
-    --resources "$ALLOC_ID" \
-    --tags \
-      Key=Name,Value=__ASG_NAME__ \
-      Key=Project,Value=__PROJECT__ \
-      Key=Application,Value=__APPLICATION__ \
-      Key=Environment,Value=__ENV_NAME__ \
-    --region __REGION__
+    --region __REGION__ 2>/dev/null || true)
 
   if [ -n "$ALLOC_ID" ]; then
     PUBLIC_IP=$(aws ec2 describe-addresses \
@@ -232,13 +239,7 @@ EOF
   -s || true
 
 ###############################################################################
-# CloudFormation signal
+# Done — cfn-signal fires via EXIT trap above
 ###############################################################################
 
-yum update -y aws-cfn-bootstrap || true
-
-/opt/aws/bin/cfn-signal \
-  -e "$OVERALL_STATUS" \
-  --stack __STACK_NAME__ \
-  --resource __ASG__ \
-  --region __REGION__
+echo "Bootstrap complete. OVERALL_STATUS=$OVERALL_STATUS"
