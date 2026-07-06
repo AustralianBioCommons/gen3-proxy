@@ -238,6 +238,8 @@ export class ProxyStack extends cdk.Stack {
         // which is sufficient for CloudFormation to track instance readiness.
       });
 
+
+
       // Build user-data using ONLY concrete strings — no CDK tokens allowed.
       //
       // When asg.addUserData() receives a string containing CFN tokens (e.g.
@@ -290,12 +292,12 @@ export class ProxyStack extends cdk.Stack {
       // the hook topic, causing lifecycle hook messages to be delivered to the
       // alarm Lambda which only expects CloudWatch alarm messages.
       // The Lambda completes the hook via the autoscaling API directly on OK.
-      new autoscaling.LifecycleHook(this, `LifecycleHook${index}`, {
-        autoScalingGroup: asg,
-        lifecycleTransition: autoscaling.LifecycleTransition.INSTANCE_LAUNCHING,
-        defaultResult: autoscaling.DefaultResult.ABANDON,
-        heartbeatTimeout: cdk.Duration.minutes(25),
-      });
+      // new autoscaling.LifecycleHook(this, `LifecycleHook${index}`, {
+      //   autoScalingGroup: asg,
+      //   lifecycleTransition: autoscaling.LifecycleTransition.INSTANCE_LAUNCHING,
+      //   defaultResult: autoscaling.DefaultResult.ABANDON,
+      //   heartbeatTimeout: cdk.Duration.minutes(25),
+      // });
 
       // Derive route table IDs from proxied subnet IDs at synth time —
       // identical to the original squid-aws-proxy approach.
