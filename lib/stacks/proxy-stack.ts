@@ -76,7 +76,10 @@ export class ProxyStack extends cdk.Stack {
       })
     );
 
-    // EIP allocation, association and SSM publishing
+    // EIP allocation, association, tagging, and SSM publishing.
+    // DescribeTags + CreateTags are required by the user-data tag-copy logic
+    // (instance tags → EIP). Without them the copy fails silently (|| true)
+    // and EIPs come up untagged.
     instanceRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -93,7 +96,10 @@ export class ProxyStack extends cdk.Stack {
       })
     );
 
-    configBucket.grantReadWrite(instanceRole);
+    // Read-only: instances only ever `s3 sync` bucket → local. A compromised
+    // proxy must not be able to rewrite the whitelist that governs the whole
+    // VPC's egress.
+    configBucket.grantRead(instanceRole);
 
     // -------------------------------------------------------------------------
     // CloudWatch log groups (one pair shared across all AZ instances)
@@ -223,6 +229,10 @@ export class ProxyStack extends cdk.Stack {
         desiredCapacity: 1,
         minCapacity: 1,
         maxCapacity: 1,
+        // AL2023 AMIs default to IMDSv2-required, but make it explicit so a
+        // future machineImage swap can't silently weaken it. The user-data
+        // already uses token-based IMDS calls.
+        requireImdsv2: true,
         vpcSubnets: {
           subnetType: ec2.SubnetType.PUBLIC,
           availabilityZones: [az],
@@ -234,33 +244,57 @@ export class ProxyStack extends cdk.Stack {
         // CDK's Signals implementation adds DependsOn edges between every ASG
         // in the stack to enforce signal ordering — this creates the circular
         // dependency with lifecycle hooks and alarms that CFN rejects.
-        // cfn-signal is called directly in user-data (step 7 of the script),
-        // which is sufficient for CloudFormation to track instance readiness.
+        // cfn-signal is called directly in user-data (EXIT trap), and the raw
+        // CreationPolicy / UpdatePolicy below make CFN wait for it.
       });
 
-
-
-      // Build user-data using ONLY concrete strings — no CDK tokens allowed.
-      //
-      // When asg.addUserData() receives a string containing CFN tokens (e.g.
-      // this.region, this.stackName, asg.autoScalingGroupName), CDK wraps the
-      // entire UserData in Fn::Sub. CFN's Fn::Sub then rejects any bare bash
-      // dollar signs ($((...)), ${VAR}, ${instance_id}) as malformed intrinsic
-      // function arguments — even though they are valid bash syntax.
-      //
-      // Solution: resolve everything to concrete strings at synth time.
-      //   - Region and stack name come from props / construct IDs (concrete).
-      //   - ASG name: the instance reads it from EC2 instance metadata at boot
-      //     via the autoscaling:describe-auto-scaling-instances API call, then
-      //     writes it to /etc/asg-name so the CW agent config can reference it
-      //     using the {instance_id} built-in rather than a token.
       const cfnAsg = asg.node.defaultChild as autoscaling.CfnAutoScalingGroup;
       const asgLogicalId = cfnAsg.logicalId;
 
+      // CFN waits for the cfn-signal issued by the user-data EXIT trap.
       cfnAsg.cfnOptions.creationPolicy = {
         resourceSignal: { count: 1, timeout: "PT30M" },
       };
 
+      // Rolling update so launch-template changes (new AL2023 AMI resolved at
+      // deploy time, user-data edits) actually replace the running instance.
+      // Without this, CFN updates the LT and the old instance keeps running
+      // on the old AMI indefinitely.
+      //
+      // waitOnResourceSignals: a replacement that fails to signal rolls the
+      // ASG back to the previous launch template version — critical for a
+      // proxy whose outage cascades into EKS node bootstrap failures.
+      //
+      // Trade-offs with min=max=1:
+      //   - minInstancesInService must be 0, so each AMI rollout causes a few
+      //     minutes of egress downtime in this AZ.
+      //   - Both per-AZ ASGs live in this stack and update roughly
+      //     concurrently. If simultaneous downtime across AZs is unacceptable
+      //     in prod, pin the AMI (cachedInContext) and bump it deliberately.
+      cfnAsg.cfnOptions.updatePolicy = {
+        autoScalingRollingUpdate: {
+          minInstancesInService: 0,
+          maxBatchSize: 1,
+          waitOnResourceSignals: true,
+          pauseTime: "PT15M",
+        },
+      };
+
+      // Build user-data using ONLY concrete strings — no CDK tokens allowed.
+      //
+      // When asg.addUserData() receives a string containing CFN tokens (e.g.
+      // this.region, asg.autoScalingGroupName as a Ref), CDK wraps the entire
+      // UserData in Fn::Sub. CFN's Fn::Sub then rejects any bare bash dollar
+      // signs ($((...)), ${VAR}) as malformed intrinsic function arguments —
+      // even though they are valid bash syntax.
+      //
+      // this.stackName is safe here: with an explicit `stackName` prop (or
+      // the default derived name) it is a concrete string at synth time for a
+      // top-level stack. Do NOT use this.artifactId — that is the cloud
+      // assembly artifact id (derived from the construct id), which diverges
+      // from the deployed stack name whenever stackName is set explicitly,
+      // sending cfn-signal to a stack that doesn't exist and forcing every
+      // deploy into the full PT30M timeout + rollback.
       const userDataTemplate = readFileSync(
         path.join(__dirname, "../../assets/user_data/squid_user_data.sh"),
         "utf-8"
@@ -274,7 +308,7 @@ export class ProxyStack extends cdk.Stack {
 
       const userDataStr = userDataTemplate
         .replace(/__REGION__/g, props.envTarget.region)
-        .replace(/__STACK_NAME__/g, this.artifactId)
+        .replace(/__STACK_NAME__/g, this.stackName)
         .replace(/__ASG__/g, asgLogicalId)
         .replace(/__ASG_NAME__/g, asgName)
         .replace(/__S3BUCKET__/g, configBucket.bucketName)
@@ -285,52 +319,44 @@ export class ProxyStack extends cdk.Stack {
 
       asg.addUserData(userDataStr);
 
-      // Lifecycle hook — holds the instance in Pending:Wait until the alarm
-      // transitions to OK and the Lambda calls complete_lifecycle_action.
-      // We use QueueHook with a dummy SQS queue rather than TopicHook because
-      // TopicHook automatically subscribes the notification target (Lambda) to
-      // the hook topic, causing lifecycle hook messages to be delivered to the
-      // alarm Lambda which only expects CloudWatch alarm messages.
-      // The Lambda completes the hook via the autoscaling API directly on OK.
-      // new autoscaling.LifecycleHook(this, `LifecycleHook${index}`, {
-      //   autoScalingGroup: asg,
-      //   lifecycleTransition: autoscaling.LifecycleTransition.INSTANCE_LAUNCHING,
-      //   defaultResult: autoscaling.DefaultResult.ABANDON,
-      //   heartbeatTimeout: cdk.Duration.minutes(25),
-      // });
-
       // Derive route table IDs from proxied subnet IDs at synth time —
       // identical to the original squid-aws-proxy approach.
-      // vpc.fromVpcAttributes + cdk.context.json gives us real subnet metadata
+      // Vpc.fromLookup + cdk.context.json gives us real subnet metadata
       // so subnet.routeTable.routeTableId resolves to a concrete string.
       const selection = vpc.selectSubnets({
         subnetFilters: [ec2.SubnetFilter.byIds(props.networkLookup.proxiedSubnetIds)],
       });
 
-      let routeTableIds = '';
+      let routeTableIds = "";
       selection.subnets!.forEach((subnet) => {
         routeTableIds = routeTableIds
           ? `${routeTableIds},${subnet.routeTable.routeTableId}`
           : subnet.routeTable.routeTableId;
       });
 
-      cdk.Tags.of(asg).add('RouteTableIds', routeTableIds, {
+      cdk.Tags.of(asg).add("RouteTableIds", routeTableIds, {
         applyToLaunchedInstances: false,
       });
 
       // CloudWatch alarm — breaches when Squid process CPU disappears.
-      // Dimensions match exactly what the CW agent publishes for procstat:
-      // only pidfile and process_name — AutoScalingGroupName is NOT included
-      // because newer CW agent versions don't propagate append_dimensions to
-      // procstat metrics. The alarm name still encodes the ASG name for the
-      // Lambda to parse.
+      //
+      // Dimensions: AutoScalingGroupName ONLY. The CW agent config declares
+      //   aggregation_dimensions: [["AutoScalingGroupName"]]
+      // which publishes a rollup copy of procstat_cpu_usage keyed solely on
+      // the ASG name. That rollup is stable across agent versions, unlike the
+      // full per-process dimension set (pidfile/process_name), whose exact
+      // combination varies — and a dimension set that matches nothing means
+      // permanently-missing data, which with BREACHING would drive a
+      // perpetual ALARM → route-flap loop via the Lambda.
+      //
+      // Verify once on a live instance: CloudWatch → Metrics → CWAgent →
+      // confirm procstat_cpu_usage appears under the AutoScalingGroupName-only
+      // dimension set before trusting failover to it.
       const squidMetric = new cloudwatch.Metric({
         namespace: "CWAgent",
         metricName: "procstat_cpu_usage",
         dimensionsMap: {
           AutoScalingGroupName: asgName,
-          pidfile: "/var/run/squid.pid",
-          process_name: "squid",
         },
       });
 
@@ -342,8 +368,10 @@ export class ProxyStack extends cdk.Stack {
         // 3 evaluation periods × 5 min = 15 min of missing data before alarming.
         // Gives newly-launched instances time to boot, start CW agent, and emit
         // the first procstat metric — avoiding false ALARM storms on deployment.
-        // The lifecycle hook (25 min timeout) holds the instance in Pending:Wait
-        // until the alarm goes OK regardless of evaluation periods.
+        // NOTE: on a brand-new environment the alarm starts in ALARM (metric
+        // doesn't exist yet, treatMissingData=BREACHING) and flips to OK once
+        // the first instance reports. The Lambda must tolerate that initial
+        // ALARM→OK sequence when route tables don't yet contain proxy routes.
         evaluationPeriods: 3,
         datapointsToAlarm: 3,
         threshold: 0,
