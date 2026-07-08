@@ -57,14 +57,40 @@ if [ -n "$EXISTING_ALLOC_ID" ] && [ "$EXISTING_ALLOC_ID" != "None" ]; then
   ALLOC_ID="$EXISTING_ALLOC_ID"
 else
   echo "Allocating new EIP..."
+  # NOTE: --tag-specifications is not supported by the AWS CLI v1 bundled
+  # with Amazon Linux 2, so we allocate first and tag afterwards.
   ALLOC_ID=$(aws ec2 allocate-address \
     --domain vpc \
-    --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=__ASG_NAME__},{Key=Project,Value=__PROJECT__},{Key=Application,Value=__APPLICATION__},{Key=Environment,Value=__ENV_NAME__}]" \
     --query "AllocationId" \
     --output text \
     --region __REGION__ 2>/dev/null || true)
 
-  if [ -n "$ALLOC_ID" ]; then
+  if [ -n "$ALLOC_ID" ] && [ "$ALLOC_ID" != "None" ]; then
+    # Copy this instance's tags onto the EIP (ASG propagates tags to
+    # instances, so the instance is the source of truth). aws:-prefixed
+    # tags are reserved and must be filtered out or create-tags rejects
+    # the entire call.
+    aws ec2 describe-tags \
+      --filters "Name=resource-id,Values=$INSTANCE_ID" \
+      --query "Tags[?!starts_with(Key, 'aws:')].{Key:Key,Value:Value}" \
+      --output json \
+      --region __REGION__ > /tmp/instance-tags.json || echo '[]' > /tmp/instance-tags.json
+
+    if [ -s /tmp/instance-tags.json ] && [ "$(cat /tmp/instance-tags.json)" != "[]" ]; then
+      aws ec2 create-tags \
+        --resources "$ALLOC_ID" \
+        --tags file:///tmp/instance-tags.json \
+        --region __REGION__ || true
+    fi
+
+    # Give the EIP its own distinct Name (overrides the copied instance Name)
+    aws ec2 create-tags \
+      --resources "$ALLOC_ID" \
+      --tags Key=Name,Value=__ASG_NAME__ \
+      --region __REGION__ || true
+
+    rm -f /tmp/instance-tags.json
+
     PUBLIC_IP=$(aws ec2 describe-addresses \
       --allocation-ids "$ALLOC_ID" \
       --query "Addresses[0].PublicIp" \
@@ -85,10 +111,13 @@ else
       --region __REGION__ || true
 
     echo "Allocated EIP $PUBLIC_IP ($ALLOC_ID)"
+  else
+    echo "WARNING: EIP allocation failed; continuing without EIP"
+    ALLOC_ID=""
   fi
 fi
 
-if [ -n "${ALLOC_ID:-}" ]; then
+if [ -n "${ALLOC_ID:-}" ] && [ "$ALLOC_ID" != "None" ]; then
   aws ec2 associate-address \
     --instance-id "$INSTANCE_ID" \
     --allocation-id "$ALLOC_ID" \

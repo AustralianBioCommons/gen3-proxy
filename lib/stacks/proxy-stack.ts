@@ -84,6 +84,8 @@ export class ProxyStack extends cdk.Stack {
           "ec2:AllocateAddress",
           "ec2:AssociateAddress",
           "ec2:DescribeAddresses",
+          "ec2:DescribeTags",
+          "ec2:CreateTags",
           "ssm:GetParameter",
           "ssm:PutParameter",
         ],
@@ -213,10 +215,8 @@ export class ProxyStack extends cdk.Stack {
         autoScalingGroupName: asgName,
         vpc,
         instanceType: new ec2.InstanceType(props.proxy.instanceType),
-        machineImage: ec2.MachineImage.latestAmazonLinux2({
-          storage: ec2.AmazonLinuxStorage.GENERAL_PURPOSE,
+        machineImage: ec2.MachineImage.latestAmazonLinux2023({
           edition: ec2.AmazonLinuxEdition.STANDARD,
-          virtualization: ec2.AmazonLinuxVirt.HVM,
         }),
         role: instanceRole,
         securityGroup: sg,
