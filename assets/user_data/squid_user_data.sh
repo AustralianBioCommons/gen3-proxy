@@ -241,8 +241,13 @@ rm -f /tmp/mycron
 
 dnf install -y amazon-cloudwatch-agent || true
 
-# pid_file matches pid_filename in squid.conf (/var/run/squid.pid) — keep
-# these textually identical so procstat always finds the process.
+# procstat matches by executable name, NOT pid_file: on AL2023 the squid
+# systemd unit runs the master process with --foreground, so squid never
+# writes /var/run/squid.pid despite pid_filename in squid.conf. A pid_file
+# selector therefore fails every scrape and publishes nothing, which reads
+# as "squid dead" to the missing-data alarm and triggers failover kills.
+# "exe" matches master + kid processes in any mode; the alarm is unaffected
+# because it watches the AutoScalingGroupName aggregation rollup.
 cat >/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'EOF'
 {
   "agent": {
@@ -259,7 +264,7 @@ cat >/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'EOF'
     "metrics_collected": {
       "procstat": [
         {
-          "pid_file": "/var/run/squid.pid",
+          "exe": "squid",
           "measurement": ["cpu_usage"]
         }
       ]
