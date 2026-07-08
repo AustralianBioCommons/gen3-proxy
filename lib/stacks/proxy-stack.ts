@@ -358,6 +358,10 @@ export class ProxyStack extends cdk.Stack {
         dimensionsMap: {
           AutoScalingGroupName: asgName,
         },
+        // The agent publishes every 10s (force_flush 5s), so 1-minute periods
+        // always contain data from a healthy instance. This is what takes
+        // detection from ~15 min to ~3-4 min.
+        period: cdk.Duration.minutes(1),
       });
 
       const alarm = new cloudwatch.Alarm(this, `SquidAlarm${index}`, {
@@ -365,9 +369,18 @@ export class ProxyStack extends cdk.Stack {
         alarmDescription: `Squid heartbeat for ${qualifiedName} AZ${index + 1}`,
         comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
         metric: squidMetric,
-        // 3 evaluation periods × 5 min = 15 min of missing data before alarming.
-        // Gives newly-launched instances time to boot, start CW agent, and emit
-        // the first procstat metric — avoiding false ALARM storms on deployment.
+        // 3 × 1 min of missing data before alarming: a dead instance or dead
+        // Squid is detected in ~3-4 min instead of 15.
+        //
+        // DELIBERATE CONSEQUENCE: every instance replacement (deploy, health
+        // kill) now fires ALARM during the boot gap (~5-8 min between the old
+        // instance's last datapoint and the new one's first) and clears to OK
+        // once the agent reports. The route-flip on ALARM is *desirable* here —
+        // it moves egress to the other AZ's proxy exactly while this AZ has no
+        // proxy. What must NOT happen is the Lambda calling SetInstanceHealth
+        // on the instance that's still booting: the Lambda enforces a launch
+        // grace period (see lambda-handler) before acting on instance health.
+        //
         // NOTE: on a brand-new environment the alarm starts in ALARM (metric
         // doesn't exist yet, treatMissingData=BREACHING) and flips to OK once
         // the first instance reports. The Lambda must tolerate that initial
